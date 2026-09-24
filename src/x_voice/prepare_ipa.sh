@@ -1,59 +1,69 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script as root (sudo ./install.sh)"
-  exit 1
-fi
-
-# Temporary build directory
-BUILD_DIR="/tmp/espeak_build_tmp"
-mkdir -p "$BUILD_DIR"
-cd "$BUILD_DIR"
-
-# Number of parallel cores
+ESPEAK_NG_COMMIT="b0b605c8a80f76c4c19e18033c6780c3cc4afc5b"
+BUILD_DIR=$(mktemp -d /tmp/espeak-ng-build-XXXXXX)
 CORES=$(nproc)
 
-echo "Installing base build tools"
-if command -v apt-get &> /dev/null; then
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo "Please run with sudo: sudo bash src/x_voice/prepare_ipa.sh" >&2
+    exit 1
+fi
+
+echo "Installing build dependencies"
+if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y build-essential autoconf automake libtool pkg-config git wget cmake
-elif command -v yum &> /dev/null; then
+    apt-get install -y build-essential cmake git pkg-config
+elif command -v yum >/dev/null 2>&1; then
     yum groupinstall -y "Development Tools"
-    yum install -y autoconf automake libtool pkgconfig git wget cmake
+    yum install -y cmake git pkgconfig
 fi
 
-echo "Installing PCAudioLib"
-if [ ! -d "pcaudiolib" ]; then
-    git clone https://github.com/espeak-ng/pcaudiolib.git
+if command -v dpkg-architecture >/dev/null 2>&1; then
+    MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+else
+    MULTIARCH=$(gcc -dumpmachine)
 fi
-cd pcaudiolib
-./autogen.sh
-# Install to /usr
-./configure --prefix=/usr --sysconfdir=/etc
-make -j$CORES
-make install
-cd ..
 
-echo "Installing Espeak-NG"
-if [ ! -d "espeak-ng" ]; then
-    git clone https://github.com/espeak-ng/espeak-ng.git
+echo "Building Espeak-NG commit $ESPEAK_NG_COMMIT"
+git clone https://github.com/espeak-ng/espeak-ng.git "$BUILD_DIR/espeak-ng"
+git -C "$BUILD_DIR/espeak-ng" checkout --detach "$ESPEAK_NG_COMMIT"
+
+cmake -S "$BUILD_DIR/espeak-ng" -B "$BUILD_DIR/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR="lib/$MULTIARCH" \
+    -DBUILD_SHARED_LIBS=ON \
+    -DENABLE_TESTS=OFF
+cmake --build "$BUILD_DIR/build" -j"$CORES"
+
+echo "Removing conflicting Espeak-NG libraries and data"
+for dir in /usr/local/lib /usr/lib "/usr/lib/$MULTIARCH" /root/.local/lib; do
+    [ -d "$dir" ] || continue
+    rm -f "$dir"/libespeak-ng.so*
+done
+
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -n "$USER_HOME" ] && [ -d "$USER_HOME/.local/lib" ]; then
+        rm -f "$USER_HOME/.local/lib"/libespeak-ng.so*
+    fi
 fi
-cd espeak-ng
-cmake -B build -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build build -j$CORES
-cmake --install build
 
-# Refresh dynamic library cache so the system can recognize new .so files immediately
+rm -rf /usr/share/espeak-ng-data \
+       /usr/local/share/espeak-ng-data \
+       /espeak-ng/share/espeak-ng-data
+
+cmake --install "$BUILD_DIR/build"
 ldconfig
 
-echo "Cleaning up"
-rm -rf "$BUILD_DIR"
-echo "Verification:"
-espeak-ng --version  
-# Expected: Data at: /usr/share/espeak-ng-data
-# python
-# from phonemizer.backend import EspeakBackend
-# print(EspeakBackend('en-us').phonemize(['Hello, world!']))
-# Expected: ['həloʊ wɜːld ']
+echo "Verification"
+unset PHONEMIZER_ESPEAK_LIBRARY
+unset PHONEMIZER_ESPEAK_DATA_PATH
+espeak-ng --version
+python src/x_voice/train/datasets/test_ipav6.py --text "Hello world." --language en
+# ipa_text: h|ə|l|ˈoʊ w|ˈɜː|l|d .
+python src/x_voice/train/datasets/test_ipav6.py --text "안녕, 세상." --language ko
+# ipa_text: iʲ|ˈɯ|ŋ|ɐ|n|n|j|ˌʌ|ŋ , s|e|s|ˈɐ|ŋ .

@@ -89,13 +89,12 @@ cd X-Voice
 pip install -e .
 ```
 
-Check your ESpeak-ng installation:
+
+To install the project-pinned Espeak-NG runtime, run:
 
 ```bash
-espeak-ng --version
+sudo bash src/x_voice/prepare_ipa.sh
 ```
-
-If not found, run `bash src/x_voice/prepare_ipa.sh` first.
 
 ## Inference
 
